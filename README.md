@@ -186,7 +186,7 @@ In online mode, the execution server automatically downloads and extracts the ap
 # Typical Workflows 
 
 #### **Workflow 1** - *Save configuration* 
-1. In CloudShell Portal, reserve the **Arista EOS resource**.
+1. In CloudShell Portal, add the **Arista EOS** resource to your blueprint and reserve the blueprint.
 
 2. Run the **Save** resource command.
 
@@ -200,7 +200,7 @@ In online mode, the execution server automatically downloads and extracts the ap
 The Startup or Running configuration is saved to a file named *<ResourceName>-<startup/running-config>-<timestamp>*, which is stored in the folder path you entered above.
 
 #### **Workflow 2** - *Restore configuration* 
-1. In CloudShell Portal, reserve the **Arista EOS resource**.
+1. In CloudShell Portal, add the **Arista EOS** resource to your blueprint and reserve the blueprint.
 
 2. Run the **Restore** resource command.
 
@@ -213,7 +213,7 @@ The Startup or Running configuration is saved to a file named *<ResourceName>-<s
 4. Click **Run**.
 
 #### **Workflow 3** - *Load firmware* 
-1. In CloudShell portal, reserve the **Arista EOS resource**.
+1. In CloudShell Portal, add the **Arista EOS** resource to your blueprint and reserve the blueprint.
 
 2. Run the resource command **Load Firmware**. 
 
@@ -232,7 +232,7 @@ To suggest an idea for the product, see [Quali's Idea box](https://community.qua
 To connect with Quali users and experts from around the world, ask questions and discuss issues, see [Quali's Community forums](https://community.quali.com/forums). 
 
 # Release Notes 
-**Arista EOS Switch 2G version 1.0.0**
+**Arista EOS Switch 2G**
 
 ### Known Issues
 * Shell does not support configuring SNMP v3
