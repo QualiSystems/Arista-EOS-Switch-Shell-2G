@@ -1,335 +1,388 @@
 #!/usr/bin/python
-# -*- coding: utf-8 -*-
+from __future__ import annotations
 
-from cloudshell.devices.driver_helper import get_logger_with_thread_id, get_api, get_cli
-from cloudshell.devices.driver_helper import parse_custom_commands
-from cloudshell.devices.standards.networking.configuration_attributes_structure import \
-    create_networking_resource_from_context
-from cloudshell.devices.runners.run_command_runner import RunCommandRunner as CommandRunner
-from cloudshell.devices.runners.state_runner import StateRunner as StateRunner
-from cloudshell.networking.networking_resource_driver_interface import NetworkingResourceDriverInterface
+from typing import TYPE_CHECKING
+
+from cloudshell.cli.service.cli import CLI
+from cloudshell.cli.service.session_pool_manager import SessionPoolManager
 from cloudshell.shell.core.driver_utils import GlobalLock
+from cloudshell.shell.core.orchestration_save_restore import OrchestrationSaveRestore
 from cloudshell.shell.core.resource_driver_interface import ResourceDriverInterface
+from cloudshell.shell.core.session.cloudshell_session import CloudShellSessionContext
+from cloudshell.shell.core.session.logging_session import LoggingSessionContext
+from cloudshell.shell.flows.command.basic_flow import RunCommandFlow
+from cloudshell.shell.flows.connectivity.parse_request_service import (
+    ParseConnectivityRequestService,
+)
+from cloudshell.shell.flows.state.basic_flow import StateFlow
+from cloudshell.shell.standards.networking.autoload_model import NetworkingResourceModel
+from cloudshell.shell.standards.networking.driver_interface import (
+    NetworkingResourceDriverInterface,
+)
+from cloudshell.shell.standards.networking.resource_config import (
+    NetworkingResourceConfig,
+)
+from cloudshell.snmp.snmp_configurator import EnableDisableSnmpConfigurator
 
-from cloudshell.networking.arista.cli.arista_cli_handler import AristaCliHandler as CliHandler
-from cloudshell.networking.arista.snmp.arista_snmp_handler import AristaSnmpHandler as SnmpHandler
-from cloudshell.networking.arista.runners.arista_autoload_runner import AristaAutoloadRunner as AutoloadRunner
-from cloudshell.networking.arista.runners.arista_connectivity_runner import \
-    AristaConnectivityRunner as ConnectivityRunner
-from cloudshell.networking.arista.runners.arista_configuration_runner import \
-    AristaConfigurationRunner as ConfigurationRunner
-from cloudshell.networking.arista.runners.arista_firmware_runner import \
-    AristaFirmwareRunner as FirmwareRunner
+from cloudshell.networking.arista.cli.arista_cli_configurator import (
+    AristaCLIConfigurator,
+)
+from cloudshell.networking.arista.flows.arista_autoload_flow import AristaAutoloadFlow
+from cloudshell.networking.arista.flows.arista_configuration_flow import (
+    AristaConfigurationFlow,
+)
+from cloudshell.networking.arista.flows.arista_connectivity_flow import (
+    AristaConnectivityFlow,
+)
+from cloudshell.networking.arista.flows.arista_load_firmware_flow import (
+    AristaLoadFirmwareFlow,
+)
+from cloudshell.networking.arista.flows.enable_disable_snmp import (
+    AristaEnableDisableSNMPFlow,
+)
+
+if TYPE_CHECKING:
+    from cloudshell.shell.core.driver_context import (
+        AutoLoadCommandContext,
+        AutoLoadDetails,
+        InitCommandContext,
+        ResourceCommandContext,
+    )
 
 
-class AristaEosSwitchShell2GDriver(ResourceDriverInterface, NetworkingResourceDriverInterface, GlobalLock):
+class AristaEosSwitchShell2GDriver(
+    ResourceDriverInterface, NetworkingResourceDriverInterface
+):
     SUPPORTED_OS = ["EOS"]
     SHELL_NAME = "AristaEosSwitchShell2G"
 
     def __init__(self):
-        super(AristaEosSwitchShell2GDriver, self).__init__()
+        super().__init__()
         self._cli = None
 
-    def initialize(self, context):
-        """Initialize method
-
-        :type context: cloudshell.shell.core.context.driver_context.InitCommandContext
-        """
-
-        resource_config = create_networking_resource_from_context(shell_name=self.SHELL_NAME,
-                                                                  supported_os=self.SUPPORTED_OS,
-                                                                  context=context)
+    def initialize(self, context: InitCommandContext):
+        """Initialize method."""
+        resource_config = NetworkingResourceConfig.from_context(
+            self.SHELL_NAME, context, None, self.SUPPORTED_OS
+        )
 
         session_pool_size = int(resource_config.sessions_concurrency_limit)
-        self._cli = get_cli(session_pool_size)
-        return 'Finished initializing'
+        self._cli = CLI(
+            SessionPoolManager(max_pool_size=session_pool_size, pool_timeout=100)
+        )
+        return "Finished initializing"
 
     @GlobalLock.lock
-    def get_inventory(self, context):
-        """Return device structure with all standard attributes
+    def get_inventory(self, context: AutoLoadCommandContext) -> AutoLoadDetails:
+        """Return device structure with all standard attributes."""
+        with LoggingSessionContext(context) as logger:
+            api = CloudShellSessionContext(context).get_api()
 
-        :param ResourceCommandContext context: ResourceCommandContext object with all Resource Attributes inside
-        :return: response
-        :rtype: str
-        """
+            resource_config = NetworkingResourceConfig.from_context(
+                self.SHELL_NAME, context, api, self.SUPPORTED_OS
+            )
 
-        logger = get_logger_with_thread_id(context)
-        api = get_api(context)
+            cli_configurator = AristaCLIConfigurator(
+                resource_config, api, logger, self._cli
+            )
+            enable_disable_snmp_flow = AristaEnableDisableSNMPFlow(
+                cli_configurator, logger, resource_config.vrf_management_name
+            )
+            snmp_configurator = EnableDisableSnmpConfigurator(
+                enable_disable_snmp_flow, resource_config, logger
+            )
 
-        resource_config = create_networking_resource_from_context(shell_name=self.SHELL_NAME,
-                                                                  supported_os=self.SUPPORTED_OS,
-                                                                  context=context)
-        cli_handler = CliHandler(self._cli, resource_config, logger, api)
-        snmp_handler = SnmpHandler(resource_config, logger, api, cli_handler)
+            resource_model = NetworkingResourceModel.from_resource_config(
+                resource_config
+            )
 
-        autoload_operations = AutoloadRunner(logger=logger,
-                                             resource_config=resource_config,
-                                             snmp_handler=snmp_handler)
-        logger.info('Autoload started')
-        response = autoload_operations.discover()
-        logger.info('Autoload completed')
-        return response
+            autoload_operations = AristaAutoloadFlow(snmp_configurator, logger)
+            logger.info("Autoload started")
+            response = autoload_operations.discover(self.SUPPORTED_OS, resource_model)
+            logger.info("Autoload completed")
+            return response
 
-    def run_custom_command(self, context, custom_command):
-        """Send custom command
+    def run_custom_command(
+        self, context: ResourceCommandContext, custom_command: str
+    ) -> str:
+        """Send custom command."""
+        with LoggingSessionContext(context) as logger:
+            api = CloudShellSessionContext(context).get_api()
 
-        :param ResourceCommandContext context: ResourceCommandContext object with all Resource Attributes inside
-        :return: result
-        :rtype: str
-        """
+            resource_config = NetworkingResourceConfig.from_context(
+                self.SHELL_NAME,
+                context,
+                api,
+                self.SUPPORTED_OS,
+            )
+            cli_configurator = AristaCLIConfigurator(
+                resource_config, api, logger, self._cli
+            )
 
-        logger = get_logger_with_thread_id(context)
-        api = get_api(context)
+            send_command_flow = RunCommandFlow(logger, cli_configurator)
+            response = send_command_flow.run_custom_command(custom_command)
+            return response
 
-        resource_config = create_networking_resource_from_context(shell_name=self.SHELL_NAME,
-                                                                  supported_os=self.SUPPORTED_OS,
-                                                                  context=context)
+    def run_custom_config_command(
+        self, context: ResourceCommandContext, custom_command: str
+    ) -> str:
+        """Send custom command in configuration mode."""
+        with LoggingSessionContext(context) as logger:
+            api = CloudShellSessionContext(context).get_api()
 
-        cli_handler = CliHandler(self._cli, resource_config, logger, api)
-        send_command_operations = CommandRunner(logger=logger, cli_handler=cli_handler)
+            resource_config = NetworkingResourceConfig.from_context(
+                self.SHELL_NAME,
+                context,
+                api,
+                self.SUPPORTED_OS,
+            )
+            cli_configurator = AristaCLIConfigurator(
+                resource_config, api, logger, self._cli
+            )
 
-        response = send_command_operations.run_custom_command(custom_command=parse_custom_commands(custom_command))
+            send_command_flow = RunCommandFlow(logger, cli_configurator)
+            response = send_command_flow.run_custom_config_command(custom_command)
+            return response
 
-        return response
+    def ApplyConnectivityChanges(
+        self, context: ResourceCommandContext, request: str
+    ) -> str:
+        """Create vlan and add or remove it to/from network interface."""
+        with LoggingSessionContext(context) as logger:
+            logger.info("Apply Connectivity command started")
+            api = CloudShellSessionContext(context).get_api()
+            resource_config = NetworkingResourceConfig.from_context(
+                self.SHELL_NAME,
+                context,
+                api,
+                self.SUPPORTED_OS,
+            )
+            cli_configurator = AristaCLIConfigurator(
+                resource_config, api, logger, self._cli
+            )
+            connectivity_request_service = ParseConnectivityRequestService(
+                is_vlan_range_supported=True, is_multi_vlan_supported=True
+            )
+            flow = AristaConnectivityFlow(
+                connectivity_request_service, logger, resource_config, cli_configurator
+            )
+            result = flow.apply_connectivity(request)
+            logger.info(f"Apply connectivity command finished with response {result}")
+            return result
 
-    def run_custom_config_command(self, context, custom_command):
-        """Send custom command in configuration mode
+    def save(
+        self,
+        context: ResourceCommandContext,
+        folder_path: str,
+        configuration_type: str,
+        vrf_management_name: str,
+    ) -> str:
+        """Save selected file to the provided destination.
 
-        :param ResourceCommandContext context: ResourceCommandContext object with all Resource Attributes inside
-        :return: result
-        :rtype: str
-        """
-
-        logger = get_logger_with_thread_id(context)
-        api = get_api(context)
-
-        resource_config = create_networking_resource_from_context(shell_name=self.SHELL_NAME,
-                                                                  supported_os=self.SUPPORTED_OS,
-                                                                  context=context)
-
-        cli_handler = CliHandler(self._cli, resource_config, logger, api)
-        send_command_operations = CommandRunner(logger=logger, cli_handler=cli_handler)
-
-        result_str = send_command_operations.run_custom_config_command(
-            custom_command=parse_custom_commands(custom_command))
-
-        return result_str
-
-    def ApplyConnectivityChanges(self, context, request):
-        """
-        Create vlan and add or remove it to/from network interface
-
-        :param ResourceCommandContext context: ResourceCommandContext object with all Resource Attributes inside
-        :param str request: request json
-        :return:
-        """
-
-        logger = get_logger_with_thread_id(context)
-        api = get_api(context)
-
-        resource_config = create_networking_resource_from_context(shell_name=self.SHELL_NAME,
-                                                                  supported_os=self.SUPPORTED_OS,
-                                                                  context=context)
-
-        cli_handler = CliHandler(self._cli, resource_config, logger, api)
-        connectivity_operations = ConnectivityRunner(logger=logger, cli_handler=cli_handler)
-        logger.info('Start applying connectivity changes, request is: {0}'.format(str(request)))
-        result = connectivity_operations.apply_connectivity_changes(request=request)
-        logger.info('Finished applying connectivity changes, response is: {0}'.format(str(result)))
-        logger.info('Apply Connectivity changes completed')
-        return result
-
-    def save(self, context, folder_path, configuration_type, vrf_management_name):
-        """Save selected file to the provided destination
-
-        :param ResourceCommandContext context: ResourceCommandContext object with all Resource Attributes inside
+        :param context: ResourceCommandContext object with
+            all Resource Attributes inside
         :param configuration_type: source file, which will be saved
         :param folder_path: destination path where file will be saved
         :param vrf_management_name: VRF management Name
-        :return str saved configuration file name:
+        :return: saved configuration file name.
         """
-
-        logger = get_logger_with_thread_id(context)
-        api = get_api(context)
-
-        resource_config = create_networking_resource_from_context(shell_name=self.SHELL_NAME,
-                                                                  supported_os=self.SUPPORTED_OS,
-                                                                  context=context)
-
-        if not configuration_type:
-            configuration_type = 'running'
-
-        if not vrf_management_name:
-            vrf_management_name = resource_config.vrf_management_name
-
-        cli_handler = CliHandler(self._cli, resource_config, logger, api)
-        configuration_operations = ConfigurationRunner(cli_handler=cli_handler,
-                                                       logger=logger,
-                                                       resource_config=resource_config,
-                                                       api=api)
-        logger.info('Save started')
-        response = configuration_operations.save(folder_path=folder_path, configuration_type=configuration_type,
-                                                 vrf_management_name=vrf_management_name)
-        logger.info('Save completed')
-        return response
+        with LoggingSessionContext(context) as logger:
+            logger.info("Apply Connectivity command started")
+            api = CloudShellSessionContext(context).get_api()
+            resource_config = NetworkingResourceConfig.from_context(
+                self.SHELL_NAME,
+                context,
+                api,
+                self.SUPPORTED_OS,
+            )
+            cli_configurator = AristaCLIConfigurator(
+                resource_config, api, logger, self._cli
+            )
+            flow = AristaConfigurationFlow(logger, resource_config, cli_configurator)
+            result = flow.save(folder_path, configuration_type, vrf_management_name)
+            logger.info("Save command completed")
+            return result
 
     @GlobalLock.lock
-    def restore(self, context, path, configuration_type, restore_method, vrf_management_name):
-        """Restore selected file to the provided destination
+    def restore(
+        self,
+        context: ResourceCommandContext,
+        path: str,
+        configuration_type: str,
+        restore_method: str,
+        vrf_management_name: str,
+    ) -> None:
+        """Restore selected file to the provided destination.
 
-        :param ResourceCommandContext context: ResourceCommandContext object with all Resource Attributes inside
+        :param ResourceCommandContext context: ResourceCommandContext object
+            with all Resource Attributes inside
         :param path: source config file
         :param configuration_type: running or startup configs
         :param restore_method: append or override methods
         :param vrf_management_name: VRF management Name
         """
+        with LoggingSessionContext(context) as logger:
+            logger.info("Apply Connectivity command started")
+            api = CloudShellSessionContext(context).get_api()
+            resource_config = NetworkingResourceConfig.from_context(
+                self.SHELL_NAME,
+                context,
+                api,
+                self.SUPPORTED_OS,
+            )
+            if not configuration_type:
+                configuration_type = "running"
 
-        logger = get_logger_with_thread_id(context)
-        api = get_api(context)
+            if not restore_method:
+                restore_method = "override"
 
-        resource_config = create_networking_resource_from_context(shell_name=self.SHELL_NAME,
-                                                                  supported_os=self.SUPPORTED_OS,
-                                                                  context=context)
+            cli_configurator = AristaCLIConfigurator(
+                resource_config, api, logger, self._cli
+            )
+            flow = AristaConfigurationFlow(logger, resource_config, cli_configurator)
+            flow.restore(path, configuration_type, restore_method, vrf_management_name)
+            logger.info("Restore command completed")
 
-        if not configuration_type:
-            configuration_type = 'running'
+    def orchestration_save(
+        self, context: ResourceCommandContext, mode: str, custom_params: str
+    ) -> str:
+        """Orchestration save.
 
-        if not restore_method:
-            restore_method = 'override'
-
-        if not vrf_management_name:
-            vrf_management_name = resource_config.vrf_management_name
-
-        cli_handler = CliHandler(self._cli, resource_config, logger, api)
-        configuration_operations = ConfigurationRunner(cli_handler=cli_handler,
-                                                       logger=logger,
-                                                       resource_config=resource_config,
-                                                       api=api)
-        logger.info('Restore started')
-        configuration_operations.restore(path=path, restore_method=restore_method,
-                                         configuration_type=configuration_type,
-                                         vrf_management_name=vrf_management_name)
-        logger.info('Restore completed')
-
-    def orchestration_save(self, context, mode, custom_params):
-        """
-
-        :param ResourceCommandContext context: ResourceCommandContext object with all Resource Attributes inside
+        :param context: ResourceCommandContext object with
+            all Resource Attributes inside
         :param mode: mode
         :param custom_params: json with custom save parameters
-        :return str response: response json
+        :return response: response json
         """
+        with LoggingSessionContext(context) as logger:
+            logger.info("Orchestration save command started")
+            api = CloudShellSessionContext(context).get_api()
+            resource_config = NetworkingResourceConfig.from_context(
+                self.SHELL_NAME,
+                context,
+                api,
+                self.SUPPORTED_OS,
+            )
 
-        if not mode:
-            mode = 'shallow'
+            cli_configurator = AristaCLIConfigurator(
+                resource_config, api, logger, self._cli
+            )
+            flow = AristaConfigurationFlow(logger, resource_config, cli_configurator)
+            result = flow.orchestration_save(mode, custom_params)
+            response_json = OrchestrationSaveRestore(
+                logger, resource_config.name
+            ).prepare_orchestration_save_result(result)
+            logger.info("Orchestration save command completed")
+            return response_json
 
-        logger = get_logger_with_thread_id(context)
-        api = get_api(context)
+    def orchestration_restore(
+        self,
+        context: ResourceCommandContext,
+        saved_artifact_info: str,
+        custom_params: str,
+    ) -> None:
+        """Restores a saved artifact previously saved by this Shell driver.
 
-        resource_config = create_networking_resource_from_context(shell_name=self.SHELL_NAME,
-                                                                  supported_os=self.SUPPORTED_OS,
-                                                                  context=context)
-
-        cli_handler = CliHandler(self._cli, resource_config, logger, api)
-        configuration_operations = ConfigurationRunner(cli_handler=cli_handler,
-                                                       logger=logger,
-                                                       resource_config=resource_config,
-                                                       api=api)
-
-        logger.info('Orchestration save started')
-        response = configuration_operations.orchestration_save(mode=mode, custom_params=custom_params)
-        logger.info('Orchestration save completed')
-        return response
-
-    def orchestration_restore(self, context, saved_artifact_info, custom_params):
-        """
-
-        :param ResourceCommandContext context: ResourceCommandContext object with all Resource Attributes inside
+        :param ResourceCommandContext context: ResourceCommandContext object
+            with all Resource Attributes inside
         :param saved_artifact_info: OrchestrationSavedArtifactInfo json
         :param custom_params: json with custom restore parameters
         """
+        with LoggingSessionContext(context) as logger:
+            logger.info("Orchestration restore command started")
+            api = CloudShellSessionContext(context).get_api()
+            resource_config = NetworkingResourceConfig.from_context(
+                self.SHELL_NAME,
+                context,
+                api,
+                self.SUPPORTED_OS,
+            )
 
-        logger = get_logger_with_thread_id(context)
-        api = get_api(context)
-
-        resource_config = create_networking_resource_from_context(shell_name=self.SHELL_NAME,
-                                                                  supported_os=self.SUPPORTED_OS,
-                                                                  context=context)
-
-        cli_handler = CliHandler(self._cli, resource_config, logger, api)
-        configuration_operations = ConfigurationRunner(cli_handler=cli_handler,
-                                                       logger=logger,
-                                                       resource_config=resource_config,
-                                                       api=api)
-
-        logger.info('Orchestration restore started')
-        configuration_operations.orchestration_restore(saved_artifact_info=saved_artifact_info,
-                                                       custom_params=custom_params)
-        logger.info('Orchestration restore completed')
+            cli_configurator = AristaCLIConfigurator(
+                resource_config, api, logger, self._cli
+            )
+            flow = AristaConfigurationFlow(logger, resource_config, cli_configurator)
+            restore_params = OrchestrationSaveRestore(
+                logger, resource_config.name
+            ).parse_orchestration_save_result(saved_artifact_info)
+            flow.restore(**restore_params)
+            logger.info("Orchestration restore command completed")
 
     @GlobalLock.lock
-    def load_firmware(self, context, path, vrf_management_name):
-        """Upload and updates firmware on the resource
+    def load_firmware(
+        self, context: ResourceCommandContext, path: str, vrf_management_name: str
+    ) -> None:
+        """Upload and updates firmware on the resource.
 
-        :param ResourceCommandContext context: ResourceCommandContext object with all Resource Attributes inside
+        :param ResourceCommandContext context: ResourceCommandContext object
+            with all Resource Attributes inside
         :param path: full path to firmware file, i.e. tftp://10.10.10.1/firmware.tar
         :param vrf_management_name: VRF management Name
         """
+        with LoggingSessionContext(context) as logger:
+            logger.info("Load firmware command started")
+            api = CloudShellSessionContext(context).get_api()
+            resource_config = NetworkingResourceConfig.from_context(
+                self.SHELL_NAME,
+                context,
+                api,
+                self.SUPPORTED_OS,
+            )
+            cli_configurator = AristaCLIConfigurator(
+                resource_config, api, logger, self._cli
+            )
+            flow = AristaLoadFirmwareFlow(logger, resource_config, cli_configurator)
+            flow.load_firmware(path, vrf_management_name)
+            logger.info("Finish Load Firmware")
 
-        logger = get_logger_with_thread_id(context)
-        api = get_api(context)
+    def health_check(self, context: ResourceCommandContext) -> str:
+        """Performs device health check.
 
-        resource_config = create_networking_resource_from_context(shell_name=self.SHELL_NAME,
-                                                                  supported_os=self.SUPPORTED_OS,
-                                                                  context=context)
-
-        if not vrf_management_name:
-            vrf_management_name = resource_config.vrf_management_name
-
-        cli_handler = CliHandler(self._cli, resource_config, logger, api)
-
-        logger.info('Start Load Firmware')
-        firmware_operations = FirmwareRunner(cli_handler=cli_handler, logger=logger)
-        response = firmware_operations.load_firmware(path=path, vrf_management_name=vrf_management_name)
-        logger.info('Finish Load Firmware: {}'.format(response))
-
-    def health_check(self, context):
-        """Performs device health check
-
-        :param ResourceCommandContext context: ResourceCommandContext object with all Resource Attributes inside
+        :param ResourceCommandContext context: ResourceCommandContext object
+            with all Resource Attributes inside
         :return: Success or Error message
         :rtype: str
         """
+        with LoggingSessionContext(context) as logger:
+            logger.info("Load firmware command started")
+            api = CloudShellSessionContext(context).get_api()
+            resource_config = NetworkingResourceConfig.from_context(
+                self.SHELL_NAME,
+                context,
+                api,
+                self.SUPPORTED_OS,
+            )
+            cli_configurator = AristaCLIConfigurator(
+                resource_config, api, logger, self._cli
+            )
 
-        logger = get_logger_with_thread_id(context)
-        api = get_api(context)
-
-        resource_config = create_networking_resource_from_context(shell_name=self.SHELL_NAME,
-                                                                  supported_os=self.SUPPORTED_OS,
-                                                                  context=context)
-        cli_handler = CliHandler(self._cli, resource_config, logger, api)
-
-        state_operations = StateRunner(logger=logger, api=api, resource_config=resource_config, cli_handler=cli_handler)
-        return state_operations.health_check()
+            flow = StateFlow(logger, resource_config, cli_configurator, api)
+            result = flow.health_check()
+            logger.info(f"Health Check command ended with result: {result}")
+            return result
 
     def cleanup(self):
         pass
 
-    def shutdown(self, context):
-        """ Shutdown device
+    def shutdown(self, context: ResourceCommandContext) -> str:
+        """Shutdown device.
 
-        :param ResourceCommandContext context: ResourceCommandContext object with all Resource Attributes inside
+        :param ResourceCommandContext context: ResourceCommandContext object
+            with all Resource Attributes inside
         :return:
         """
+        with LoggingSessionContext(context) as logger:
+            logger.info("Load firmware command started")
+            api = CloudShellSessionContext(context).get_api()
+            resource_config = NetworkingResourceConfig.from_context(
+                self.SHELL_NAME,
+                context,
+                api,
+                self.SUPPORTED_OS,
+            )
+            cli_configurator = AristaCLIConfigurator(
+                resource_config, api, logger, self._cli
+            )
 
-        logger = get_logger_with_thread_id(context)
-        api = get_api(context)
-
-        resource_config = create_networking_resource_from_context(shell_name=self.SHELL_NAME,
-                                                                  supported_os=self.SUPPORTED_OS,
-                                                                  context=context)
-
-        cli_handler = CliHandler(self._cli, resource_config, logger, api)
-        state_operations = StateRunner(logger=logger, api=api, resource_config=resource_config, cli_handler=cli_handler)
-
-        return state_operations.shutdown()
+            flow = StateFlow(logger, resource_config, cli_configurator, api)
+            return flow.shutdown()
