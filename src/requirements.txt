@@ -1,1 +1,4 @@
-cloudshell-networking-arista>=2.0,<2.1
+cloudshell-shell-networking-standard==5.0.4
+cloudshell-shell-core~=5.1
+cloudshell-networking-arista~=3.0.0
+PyYAML
