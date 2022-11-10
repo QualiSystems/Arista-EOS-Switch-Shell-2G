@@ -53,7 +53,7 @@ if TYPE_CHECKING:
 class AristaEosSwitchShell2GDriver(
     ResourceDriverInterface, NetworkingResourceDriverInterface
 ):
-    SUPPORTED_OS = ["EOS"]
+    SUPPORTED_OS = ["Arista", "EOS"]
     SHELL_NAME = "AristaEosSwitchShell2G"
 
     def __init__(self):
